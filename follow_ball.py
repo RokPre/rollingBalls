@@ -7,9 +7,9 @@ base = "http://localhost:8080"
 
 while True:
     try:
+        # Get the state of the simulation
         state = s.get(f"{base}/State", headers={"accept": "application/json"}).json()
         cam0 = state["camData"][0]
-
         ball_y = float(cam0["ball_y"])  # y coordinate of the ball in milimeters.
 
         # Ball is outside the field
@@ -21,6 +21,7 @@ while True:
         # Calcualte to goalie_pos: 0 => 245 mm, 1=> 455 mm.
         goalie_pos = min(max(0.0, (ball_y - 245.0) / 210.0), 1.0)
 
+        # Payload to move the goalie
         payload = {"commands": [{
             "driveID": 1,  # Goali id
             "rotationTargetPosition": 0.0,
