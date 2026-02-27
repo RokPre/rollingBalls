@@ -6,6 +6,7 @@
 # 4. Moving slow
 import json
 import math
+import time
 
 import httpx
 import requests
@@ -13,7 +14,8 @@ import requests
 from defense_modul import Defense
 
 
-URL = "http://localhost:8080"
+# URL = "http://localhost:8080"
+URL = "http://192.168.222.13:8081"
 OPTIMAL_SHOOT_DISTANCE = 5  # in milimeters
 FRAME_RATE = 1 / 50
 NUM_OF_PREDICTS = 100
@@ -127,13 +129,15 @@ def determine_state(cam_data) -> int:
     if 0 > ball_x or ball_x > 1210 or 0 > ball_y > 700:
         return 0
 
+    # print(ball_vx, ball_vy)
     # Ball is moving fast towards the blue goal
-    if 3 < ball_vx:
+    if 0.25 < ball_vx:
         return 1
 
     # Ball is moving fast towards the red goal
-    if ball_vx < -3:
-        return 2
+    if ball_vx < -0.25:
+        # return 2
+        return 4
 
     found_rod = None
     rods = GEOM["rods"]
@@ -174,10 +178,10 @@ def determine_state(cam_data) -> int:
 def shoot():
     # TODO: Only move players in front of the ball up.
     payload = {"commands": [
-        {"driveID": 1, "rotationTargetPosition": 1, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 2, "rotationTargetPosition": 1, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 4, "rotationTargetPosition": 1, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 6, "rotationTargetPosition": 1, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
+        {"driveID": 1, "rotationTargetPosition": 0.25, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
+        {"driveID": 2, "rotationTargetPosition": 0.25, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
+        {"driveID": 4, "rotationTargetPosition": 0.25, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
+        {"driveID": 6, "rotationTargetPosition": 0.25, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
     ]}
     return payload
 
@@ -406,6 +410,7 @@ def main(cam_data):
 if __name__ == "__main__":
     session = requests.Session()
     while True:
+        time.sleep(1 / 50)
         try:
             r = session.get(f"{URL}/State")
             field_state = r.json()
