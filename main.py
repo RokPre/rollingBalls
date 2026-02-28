@@ -1,425 +1,362 @@
-# 4 states
-# 0. No play
-# 1. Blue possesion
-# 2. Red possesion
-# 3. Moving fast
-# 4. Moving slow
 import json
-import math
 import time
 
-import httpx
 import requests
 
-from defense_modul import Defense
-
-
-# URL = "http://localhost:8080"
-URL = "http://192.168.222.13:8081"
-OPTIMAL_SHOOT_DISTANCE = 5  # in milimeters
-FRAME_RATE = 1 / 50
-NUM_OF_PREDICTS = 100
-
+URL = "http://localhost:8080"
+FPS = 50
+PERIOD = 1 / FPS
+BALL_PRED_COUNT = 25
 
 with open("geometry.json", "r") as g:
     GEOM = json.load(g)
-    R_BALL = GEOM["ball_size"] / 2
 
-DEFENSE = Defense(
-    geometry_path="geometry.json",
-    rod_keeper=0, drive_keeper=1,
-    rod_def1=1, drive_def1=2,
-    rod_def2=3, drive_def2=3,
-)
-
-
-def _clamp(x, lo, hi):
-    return lo if x < lo else hi if x > hi else x
-
-
-def rod_players_from_state(cam_data):
-    rods_state = cam_data["camData"][0]["rods"]
-    field_y = GEOM["field"]["dimension_y"]
-    rods_geom = GEOM["rods"]
-
-    out = {}
-
-    for i, (rs, rg) in enumerate(zip(rods_state, rods_geom)):
-        u = float(rs["Item1"])
-        u = _clamp(u, 0.0, 1.0)
-
-        theta = float(rs["Item2"]) % (2 * math.pi)
-
-        x = float(rg["position"])
-        base = float(rg["first_offset"]) + u * float(rg["travel"])
-        players = int(rg["players"])
-        spacing = float(rg["spacing"])
-
-        pts = []
-        for k in range(players):
-            y = base + k * spacing
-
-            y = _clamp(y, 0.0, float(field_y))
-
-            pts.append({"x": x, "y": y, "theta": theta})
-
-        out[rg["id"]] = pts
-
-    return out
-
-
-def move_player_to_y(rod_id: int, player_number: int, y_coordinate: float):
-    """
-    rod_id: geometry rod id (1..8)
-    player_number: 0-based index along the rod (0..players-1)
-    y_coordinate: y in mm target point on the field.
-
-    Assumptions:
-      Item1 / translationTargetPosition is normalized to [0, 1]
-      driveID equals rod_id for motorized rods
-    """
-    rods = GEOM["rods"]
-    field_y = float(GEOM["field"]["dimension_y"])
-
-    rod = next((r for r in rods if int(r["id"]) == int(rod_id)), None)
-    if rod is None:
-        raise ValueError(f"Unknown rod_id={rod_id}")
-
-    players = int(rod["players"])
-    if not (0 <= player_number < players):
-        raise ValueError(f"player_number out of range: {player_number} for rod players={players}")
-
-    y = _clamp(y_coordinate, 0.0, field_y)
-
-    first_offset = float(rod["first_offset"])
-    spacing = float(rod["spacing"])
-    travel = float(rod["travel"])
-    if travel <= 0.0:
-        raise ValueError(f"Invalid travel={travel} for rod_id={rod_id}")
-
-    base_without_u = first_offset + player_number * spacing
-
-    u = (y - base_without_u) / travel
-    u = _clamp(u, 0.0, 1.0)
-
-    theta = 0.0
-
-    return u
-
-
-def determine_state(cam_data) -> int:
-    """
-    This function return the state that our logic is in.
-    Input: cam_data
-    Output: State (0 - ball out of play,
-                   1 - ball is moving fast towards blue goal
-                   2 - ball is moving fast towards red goal
-                   3 - ball is moving slow and not in possesion by any team
-                   4 - blue team has ball possesion
-                   5 - red team has ball possesion)
-    """
-    cam0 = cam_data["camData"][0]
-    ball_x = cam0["ball_x"]
-    ball_y = cam0["ball_y"]
-    ball_vx = cam0["ball_vx"]
-    ball_vy = cam0["ball_vy"]
-    ball_velocity = math.sqrt(float(ball_vx)**2 + float(ball_vy)**2)
-
-    # Ball is outside of play
-    if 0 > ball_x or ball_x > 1210 or 0 > ball_y > 700:
-        return 0
-
-    # print(ball_vx, ball_vy)
-    # Ball is moving fast towards the blue goal
-    if 0.25 < ball_vx:
-        return 1
-
-    # Ball is moving fast towards the red goal
-    if ball_vx < -0.25:
-        # return 2
-        return 4
-
-    found_rod = None
-    rods = GEOM["rods"]
-    # Check all the rods positions
-    for i, rod in enumerate(rods):
-        position = int(rod["position"])
-
-        # Goalies have a different margin than the other players.
-        if i == 0:  # Red goalie
-            left_margin = 40
-        else:  # Other players
-            left_margin = 50
-
-        if i == len(rods):  # Blue goalie
-            right_margin = 40
-        else:  # Other players
-            right_margin = 50
-
-        # Check if ball is within field
-        if position - left_margin < ball_x < position + right_margin:
-            found_rod = rod
-            break
-    # Not in possesion
-    else:
-        return 3
-
-    # Blue team has possesion of th ball
-    if found_rod is not None and found_rod["team"] == "blue":
-        return 4
-
-    # Red team has possesion of the ball
-    if found_rod is not None and found_rod["team"] == "red":
-        return 5
-
-    return 0
-
-
-def shoot():
-    # TODO: Only move players in front of the ball up.
-    payload = {"commands": [
-        {"driveID": 1, "rotationTargetPosition": 0.25, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 2, "rotationTargetPosition": 0.25, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 4, "rotationTargetPosition": 0.25, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 6, "rotationTargetPosition": 0.25, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-    ]}
-    return payload
-
-
-def block():
-    payload = {"commands": [
-        {"driveID": 1, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 2, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 4, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 6, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-    ]}
-    return payload
-
-
-def reposition():
-    # TODO: Prepare for the ball
-    payload = {"commands": [
-        {"driveID": 1, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 2, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 4, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-        {"driveID": 6, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-    ]}
-    return payload
-
-
-# def defend():
-#     # TODO: Alberim
-#     payload = {"commands": [
-#         {"driveID": 1, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-#         {"driveID": 2, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-#         {"driveID": 4, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-#         {"driveID": 6, "rotationTargetPosition": 0, "rotationVelocity": 1, "translationTargetPosition": 0, "translationVelocity": 0},
-#     ]}
-#     return payload
-def defend(cam_data):
-    cam0 = cam_data["camData"][0]
-
-    ball_y = cam0["ball_y"]
-    ball_visible = ball_y >= 0
-
-    commands = DEFENSE.step(
-        ball_y=float(ball_y),
-        ball_visible=ball_visible
-    )
-
-    return {"commands": commands}
-
-
-def attack(cam_data):
-    # Predict the ball position
-    cam0 = cam_data["camData"][0]
-    ball_x = cam0["ball_x"]  # x coordinate of the ball in milimeters.
-    ball_y = cam0["ball_y"]  # x coordinate of the ball in milimeters.
-
-    ball_vx = cam0["ball_vx"]  # x velocity of the ball
-    ball_vy = cam0["ball_vy"]  # y velocity of the ball
-
-    predicted_ball_pos = []
-
-    pred_ball_x: float = ball_x
-    pred_ball_y: float = ball_y
-
-    for i in range(1, NUM_OF_PREDICTS + 1):
-
-        old_pred_ball_x = pred_ball_x
-        old_pred_ball_y = pred_ball_y
-
-        pred_ball_x = float(pred_ball_x + ball_vx * FRAME_RATE)
-        pred_ball_y = float(pred_ball_y + ball_vy * FRAME_RATE)
-
-        # print(pred_ball_x)
-        # print(pred_ball_y)
-
-        if 0 + R_BALL > pred_ball_x:
-            ball_vx = -ball_vx
-            pred_ball_x = float(old_pred_ball_x + ball_vx * FRAME_RATE)
-            print("Wall bounce x")
-
-        if pred_ball_x > 1200 - R_BALL:
-            ball_vx = -ball_vx
-            pred_ball_x = float(old_pred_ball_x + ball_vx * FRAME_RATE)
-            print("Wall bounce x")
-
-        if 0 + R_BALL > pred_ball_y:
-            ball_vy = -ball_vy
-            pred_ball_y = float(old_pred_ball_y + ball_vy * FRAME_RATE)
-            print("Wall bounce y")
-
-        if pred_ball_y > 700 - R_BALL:
-            ball_vy = -ball_vy
-            pred_ball_y = float(old_pred_ball_y + ball_vy * FRAME_RATE)
-            print("Wall bounce y")
-
-        ball_pos: tuple[float, float] = (pred_ball_x, pred_ball_y)
-        predicted_ball_pos.append(ball_pos)
-
-    # Check if the ball will be in the optimal position for a shoot
-    # Check which rod has the ball
-    found_rod: dict[str, str | int] = {}
-    rods = GEOM["rods"]
-    # Check all the rods positions
-    for i, rod in enumerate(rods):
-        position = int(rod["position"])
-
-        # Goalies have a different margin than the other players.
-        if i == 0:  # Red goalie
-            left_margin = 40
-        else:  # Other players
-            left_margin = 50
-
-        if i == len(rods):  # Blue goalie
-            right_margin = 40
-        else:  # Other players
-            right_margin = 50
-
-        # Check if ball is within field
-        if position - left_margin < ball_x < position + right_margin:
-            found_rod = rod
-            break
-
-    # Find cloases player to the shooting_point
-    rod_id = found_rod["id"]
-
-    players_by_rod_id = rod_players_from_state(cam_data)
-    players_rod = players_by_rod_id[rod_id]
-
-    min_distance = float("inf")
-    best_player_id = None
-    best_ball_pos = None
-
-    for ball_pos in predicted_ball_pos:
-        for idx, player in enumerate(players_rod):
-
-            distance = abs(player["y"] - ball_pos[1])
-
-            if distance < min_distance:
-                min_distance = distance
-                best_player_id = idx
-                best_ball_pos = ball_pos
-
-    if best_player_id is not None and best_ball_pos is not None:
-        y_payload = move_player_to_y(rod_id, best_player_id, best_ball_pos[1])
-
-    # Check if shooting_point is reachabel before ball get there
-    # Move the player to the shooting point
-    # Move all players in front upwards
-
-    # TODO: Check if player is clsoe enough to the ball so that
-    if best_player_id is not None:
-        player_y = players_rod[best_player_id]["y"]
-        distance = abs(player_y - best_ball_pos[1])
-
-        # print(type(best_ball_pos))
-        # print(best_ball_pos)
-
-        if distance <= OPTIMAL_SHOOT_DISTANCE:
-            # Shoot the ball
-            payload = {
-                "commands": [
-                    {
-                        "driveID": rod_id,
-                        "translationTargetPosition": 0,
-                        "translationVelocity": 0,
-                        "rotationTargetPosition": -0.2,
-                        "rotationVelocity": 1
-                    }
-                ]
-            }
-
-        elif y_payload is not None:
-            # Track the ball
-            u = move_player_to_y(rod_id, best_player_id, best_ball_pos[1])
-            payload = {
-                "commands": [
-                    {
-                        "driveID": rod_id,
-                        "translationTargetPosition": u,
-                        "translationVelocity": 1,
-                        "rotationTargetPosition": 0,
-                        "rotationVelocity": 1
-                    }
-                ]
-            }
+BALL_SIZE: int = int(GEOM["ball_size"])
+
+
+class rod:
+    def __init__(self, rod_id: int):
+        self.rod_id: int = rod_id
+        self.rod_id_command: int = rod_id
+        if rod_id == 4:
+            self.rod_id_command = 3
+        elif rod_id == 6:
+            self.rod_id_command = 4
+
+        rod: dict[str, int | str] = dict(GEOM["rods"][rod_id - 1])
+
+        self.state: int
+        self.id: int = int(rod["id"])
+        self.team: str = str(rod["team"])
+        self.position: int = int(rod["position"])
+        self.travel: int = int(rod["travel"])
+        self.players: int = int(rod["players"])
+        self.first_offset: int = int(rod["first_offset"])
+        self.spacing: int = int(rod["spacing"])
+        self.rotatin: float = float(0)
+        self.translation_r: float = float(0)  # Relative
+        self.translation_y: list[float] = self.players * [float(0)]
+        self.ball_pred_pos: list[tuple[float, float]]
+
+    def determine_state(self, cam_data: dict[str, float]):
+        # Ball not in play:
+        ball_x = cam_data["ball_x"]
+        ball_y = cam_data["ball_y"]
+        # Ball is not in play
+        if not (0 <= ball_x <= 1210):
+            self.state = 0
+            return
+
+        # Ball is not in play
+        if not (0 <= ball_y <= 700):
+            self.state = 0
+            return
+
+        # Rod has controll of the ball
+        if abs(self.position - ball_x) < 50:
+            # Ball is behind the rod
+            if ball_x <= self.position:
+                self.state = 1
+                return
+            # Ball is in fron of the rod
+            if self.position < ball_x:
+                self.state = 2
+                return
+
+        # Ball is behind the rod
+        if ball_x <= self.position:
+            self.state = 3
+            return
+
+        # Ball is in fron of the rod
+        if self.position < ball_x:
+            self.state = 4
+            return
+
+    def prepare_attack(self):
+        return 0, 0, 0, 0
+
+    def players_by_distance_from_y(self, y: float) -> list[int]:
+        """
+        Lists all players on rod, from distance to a given y coordinate.
+        # Args:
+            - y: the value where from which we will base the sorting.
+        # Returns:
+            - sorted_list: sorted list of player ids, based from their distance to the point y.
+        """
+        sorted_list: list[int] = sorted(
+            range(len(self.translation_y)),
+            key=lambda i: abs(y - self.translation_y[i])
+        )
+        return [i + 1 for i in sorted_list]
+
+    def can_player_reach_y(self, player_id: int, y: float) -> bool:
+        """
+        Check if a given player can reach the y position.
+
+        # Args:
+            - rod_id - This is the id specified in the geometry.json file.
+            - player_id: the id of the player. Top player has id 1, bottom player can have at most 5.
+            - y: the value that we want the player to be at
+
+        # Returns:
+            - relative_rod_position: The position that the rod has to be in , so that that specific player has the right y value. If player can not reach that y value, raises ValueError.
+
+        # Raises:
+            ValueError if rod id is not between 1 and 8, if player id is too high or low and if y is unreachable.
+
+        """
+
+        rods_geom: dict[str, int | str] = GEOM["rods"][self.rod_id - 1]
+        number_of_players: int = int(rods_geom["players"])
+
+        if not (1 <= player_id <= number_of_players):
+            raise ValueError(f"player_id should be between 1 and {number_of_players}")
+
+        first_offset: int = int(rods_geom["first_offset"])
+        spacing: int = int(rods_geom["spacing"])
+        travel: int = int(rods_geom["travel"])
+
+        player_min_y: int = first_offset + spacing * (player_id - 1)
+        player_max_y: int = player_min_y + travel
+
+        return (player_min_y <= y <= player_max_y)
+
+    def player_pos_y_to_relative(self, player_id: int, y: float) -> float:
+        """
+        Convers the euclidian y to the relavie position that can be sent to the server
+
+        # Args:
+            - rod_id - This is the id specified in the geometry.json file.
+            - player_id: the id of the player. Top player has id 1, bottom player can have at most 5.
+            - y: the value that we want the player to be at
+
+        # Returns:
+            - relative_rod_position: The position that the rod has to be in , so that that specific player has the right y value. If player can not reach that y value, raises ValueError.
+
+        # Raises:
+            ValueError if rod id is not between 1 and 8, if player id is too high or low and if y is unreachable.
+        """
+
+        if not (1 <= self.rod_id <= 8):
+            raise ValueError("rod_id should be between 1 and 8")
+
+        rods_geom: dict[str, int | str] = GEOM["rods"][self.rod_id - 1]
+        number_of_players: int = int(rods_geom["players"])
+
+        if not (1 <= player_id <= number_of_players):
+            raise ValueError(f"player_id should be between 1 and {number_of_players}")
+
+        first_offset: int = int(rods_geom["first_offset"])
+        spacing: int = int(rods_geom["spacing"])
+        travel: int = int(rods_geom["travel"])
+
+        player_min_y: int = first_offset + spacing * (player_id - 1)
+        player_max_y: int = player_min_y + travel
+
+        if not (player_min_y <= y <= player_max_y):
+            raise ValueError(f"y should be between {player_min_y} and {player_max_y} for this specific player. y: {y}, rod_id: {rod_id}, player_id: {player_id}")
+
+        relative_pos: float = (y - player_min_y) / (player_max_y - player_min_y)
+
+        return relative_pos
+
+    def update_variables(self, cam_data: dict[str, float]):
+        """
+        Update the internal state of the rod calss.
+        # Input:
+            - cam_data: Data from the cameras
+        # Updates:
+            - self.translation_r: Rod translation in relative coordinates directly from the camera.
+            - self.translation_y: Rod translation in absolute coordinates.
+            - self.ball_pred_pos: A list of predicted ball positions.
+        """
+
+        # Update the rod relative pos from cam data
+        self.translation_r = cam_data[f"rod{self.rod_id}_item1"]
+
+        # Update the rod absolute pos from cam data
+        for i in range(0, self.players):
+            player_min_y: int = self.first_offset + self.spacing * i
+            player_max_y: int = player_min_y + self.travel
+            player_y: float = player_min_y + (player_max_y - player_min_y) * self.translation_r
+            self.translation_y[i] = player_y
+
+        # Update the ball position prediction array
+        self.ball_pred_pos = BALL_PRED_COUNT * [(0.0, 0.0)]
+        ball_x = cam_data["ball_x"]
+        ball_y = cam_data["ball_y"]
+        ball_vx = cam_data["ball_vx"]
+        ball_vy = cam_data["ball_vy"]
+        for i in range(0, BALL_PRED_COUNT):
+            ball_pred_x: float = ball_x + PERIOD * ball_vx * i
+            ball_pred_y: float = ball_y + PERIOD * ball_vy * i
+            self.ball_pred_pos[i] = (ball_pred_x, ball_pred_y)
+
+    def shoot(self, cam_data: dict[str, float]) -> tuple[float, float, float, float]:
+        shoot_x: float = float(self.position + BALL_SIZE / 2)
+
+        # Find best shoot position
+        min_dist = float("inf")
+        best_shoot_ball_pos: tuple[float, float] = (-1, -1)
+        for i in range(0, len(self.ball_pred_pos)):
+            dist = self.ball_pred_pos[i][0] - shoot_x
+            if dist < min_dist:
+                min_dist: float = dist
+                best_shoot_ball_pos = self.ball_pred_pos[i]
+
+        # Sort players by distance to best_shoot_ball_pos.
+        sorted_players_ids = self.players_by_distance_from_y(best_shoot_ball_pos[1])
+
+        for player_id in sorted_players_ids:
+            if self.can_player_reach_y(player_id, best_shoot_ball_pos[1]):
+                player_id_to_move = player_id
+                break
         else:
-            payload = {
-                "commands": [
-                    {
-                        "driveID": 0,
-                        "translationTargetPosition": 0,
-                        "translationVelocity": 0,
-                        "rotationTargetPosition": 0,
-                        "rotationVelocity": 0
-                    }
-                ]
-            }
-        return payload
+            return 0.0, 0.0, 0.0, 0.0
+
+        translation_r: float = self.player_pos_y_to_relative(player_id_to_move, best_shoot_ball_pos[1])
+
+        if abs(best_shoot_ball_pos[1] - self.translation_y[player_id_to_move - 1]) < BALL_SIZE / 2:
+            return translation_r, 1, -0.25, 1
+
+        return translation_r, 1, 0.0, 1
+
+    def defend(self, cam_data: dict[str, float]) -> tuple[float, float, float, float]:
+        # Find last value thats in front of the rod
+        move_player_y = None
+        for i, pos in enumerate(self.ball_pred_pos[::-1]):
+            if self.position <= pos[0]:
+                move_player_y = pos[1]
+                break
+
+        if move_player_y == None:
+            move_player_y = cam_data["ball_y"]
+
+        # Sort players by distnace to point
+        sorted_players_ids = self.players_by_distance_from_y(move_player_y)
+
+        # Check if player can reach
+        for player_id in sorted_players_ids:
+            if self.can_player_reach_y(player_id, move_player_y):
+                translation_r = self.player_pos_y_to_relative(player_id, move_player_y)
+                return translation_r, 1, 0, 1
+
+        return 0.5, 1, 0, 1
+
+    def avoid(self):
+        return 0, 0, 0.25, 1
+
+    def step(self, cam_data: dict[str, float]) -> dict[str, int | float]:
+        self.update_variables(cam_data)
+        self.determine_state(cam_data)
+
+        match self.state:
+            case 1:
+                tran, tran_vel, rot, rot_vel = self.prepare_attack()
+            case 2:
+                tran, tran_vel, rot, rot_vel = self.shoot(cam_data)
+            case 3:
+                tran, tran_vel, rot, rot_vel = self.avoid()
+            case 4:
+                tran, tran_vel, rot, rot_vel = self.defend(cam_data)
+            case _:
+                tran, tran_vel, rot, rot_vel = 0.5, 0.5, 0, 0.5
+
+        return {"driveID": int(self.rod_id_command), "translationTargetPosition": tran, "translationVelocity": tran_vel, "rotationTargetPosition": rot, "rotationVelocity": rot_vel}
 
 
-def main(cam_data):
-    state = determine_state(cam_data)
-    print(state)
-    match state:
-        # 0 - ball out of play,
-        case 0:
-            pass
-        # 1 - ball is moving fast towards blue goal
-        case 1:
-            # Raise all red players
-            return shoot()
-        # 2 - ball is moving fast towards red goal
-        case 2:
-            return block()
-        # 3 - ball is moving slow and not in possesion by any team
-        case 3:
-            return reposition()
-        # 4 - blue team has ball possesion
-        case 4:
-            return defend(cam_data)
-        # 5 - red team has ball possesion
-        case 5:
-            return attack(cam_data)
+def merge_cam_data(cam_data0: dict[str, float], cam_data1: dict[str, float]) -> dict[str, float]:
+    merged: dict[str, float] = {}
 
-    return None
+    for key in cam_data0:
+        v0 = cam_data0[key]
+        v1 = cam_data1[key]
+        merged[key] = (v0 + v1) / 2.0
+
+    return merged
+
+
+def flatten_state(field_state) -> tuple[dict[str, float], dict[str, float]]:
+    cam_data0 = field_state["camData"][0]
+    cam_data1 = field_state["camData"][1]
+
+    cam0: dict[str, float] = {"rod1_item1": cam_data0["rods"][0]["Item1"], "rod1_item2": cam_data0["rods"][0]["Item2"], "rod2_item1": cam_data0["rods"][1]["Item1"], "rod2_item2": cam_data0["rods"][1]["Item2"], "rod3_item1": cam_data0["rods"][2]["Item1"], "rod3_item2": cam_data0["rods"][2]["Item2"], "rod4_item1": cam_data0["rods"][3]["Item1"], "rod4_item2": cam_data0["rods"][3]["Item2"], "rod5_item1": cam_data0["rods"][4]["Item1"], "rod5_item2": cam_data0["rods"][4]["Item2"], "rod6_item1": cam_data0["rods"][5]["Item1"], "rod6_item2": cam_data0["rods"][5]["Item2"], "rod7_item1": cam_data0["rods"][6]["Item1"], "rod7_item2": cam_data0["rods"][6]["Item2"], "rod8_item1": cam_data0["rods"][7]["Item1"], "rod8_item2": cam_data0["rods"][7]["Item2"], "ball_x": cam_data0["ball_x"], "ball_y": cam_data0["ball_y"], "ball_vx": cam_data0["ball_vx"], "ball_vy": cam_data0["ball_vy"], "ball_size": cam_data0["ball_size"]}
+    cam1: dict[str, float] = {"rod1_item1": cam_data1["rods"][0]["Item1"], "rod1_item2": cam_data1["rods"][0]["Item2"], "rod2_item1": cam_data1["rods"][1]["Item1"], "rod2_item2": cam_data1["rods"][1]["Item2"], "rod3_item1": cam_data1["rods"][2]["Item1"], "rod3_item2": cam_data1["rods"][2]["Item2"], "rod4_item1": cam_data1["rods"][3]["Item1"], "rod4_item2": cam_data1["rods"][3]["Item2"], "rod5_item1": cam_data1["rods"][4]["Item1"], "rod5_item2": cam_data1["rods"][4]["Item2"], "rod6_item1": cam_data1["rods"][5]["Item1"], "rod6_item2": cam_data1["rods"][5]["Item2"], "rod8_item1": cam_data1["rods"][7]["Item1"], "rod8_item2": cam_data1["rods"][7]["Item2"], "rod7_item1": cam_data1["rods"][6]["Item1"], "rod7_item2": cam_data1["rods"][6]["Item2"], "ball_x": cam_data1["ball_x"], "ball_y": cam_data1["ball_y"], "ball_vx": cam_data1["ball_vx"], "ball_vy": cam_data1["ball_vy"], "ball_size": cam_data1["ball_size"]}
+    return cam0, cam1
+
+
+next_time = None
+
+
+def my_sleep():
+    global next_time
+
+    now = time.perf_counter()
+
+    if next_time is None:
+        next_time = now + PERIOD
+        return
+
+    sleep_time = next_time - now
+
+    if sleep_time > 0:
+        time.sleep(sleep_time)
+
+    next_time += PERIOD
+
+
+def main():
+    count = 0
+    start_time = time.perf_counter()
+
+    # Initialise the rods
+    rod_1 = rod(1)  # Goalie
+    rod_2 = rod(2)  # Defenders
+    rod_4 = rod(4)  # Middle
+    rod_6 = rod(6)  # Attack
+
+    # Create the session
+    session: requests.Session = requests.Session()
+
+    # Main loop
+    while True:
+        # Get the state
+        r = session.get(f"{URL}/State")
+        field_state: dict[str, dict[str, float | list[dict[str, float]]]] = dict(r.json())
+
+        # Reformat the cam data
+        cam0: dict[str, float]
+        cam1: dict[str, float]
+        cam0, cam1 = flatten_state(field_state)
+        merged_cam_data = merge_cam_data(cam0, cam1)
+
+        # Calculate command to be sent
+        gcommand: dict[str, int | float] = rod_1.step(merged_cam_data)
+        dcommand: dict[str, int | float] = rod_2.step(merged_cam_data)
+        mcommand: dict[str, int | float] = rod_4.step(merged_cam_data)
+        acommand: dict[str, int | float] = rod_6.step(merged_cam_data)
+
+        # Create payload
+        payload = {"commands": [gcommand, dcommand, mcommand, acommand]}
+
+        # Send playload
+        resp = session.post(f"{URL}/Motors/SendCommand", json=payload)
+        resp.raise_for_status()
+
+        # print("rod_1", rod_1.state)
+        # print("rod_2", rod_2.state)
+        # print("rod_4", rod_4.state)
+        # print("rod_6", rod_6.state)
+
+        # HZ
+        my_sleep()
+        count += 1
+
+        curr_time = time.perf_counter()
+        if count % 50 == 0:
+            print("FPS:", 1 / ((curr_time - start_time) / count))
 
 
 if __name__ == "__main__":
-    session = requests.Session()
-    while True:
-        time.sleep(1 / 50)
-        try:
-            r = session.get(f"{URL}/State")
-            field_state = r.json()
-
-            payload = main(field_state)
-
-            if payload is not None:
-                resp = session.post(f"{URL}/Motors/SendCommand", json=payload)
-                print(resp.status_code)
-
-        except KeyboardInterrupt:
-            break
+    main()
