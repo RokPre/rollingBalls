@@ -39,6 +39,12 @@ class rod:
         self.translation_y: list[float] = self.players * [float(0)]
         self.ball_pred_pos: list[tuple[float, float]]
 
+        self.player_min_y: list[int] = self.players * [int(0)]
+        self.player_max_y: list[int] = self.players * [int(0)]
+        for i in range(0, self.players):
+            self.player_min_y[i] = self.first_offset + self.spacing * i
+            self.player_max_y[i] = self.player_min_y[i] + self.travel
+
     def determine_state(self, cam_data: dict[str, float]):
         # Ball not in play:
         ball_x = cam_data["ball_x"]
@@ -178,9 +184,7 @@ class rod:
 
         # Update the rod absolute pos from cam data
         for i in range(0, self.players):
-            player_min_y: int = self.first_offset + self.spacing * i
-            player_max_y: int = player_min_y + self.travel
-            player_y: float = player_min_y + (player_max_y - player_min_y) * self.translation_r
+            player_y: float = self.player_min_y[i] + self.travel * self.translation_r
             self.translation_y[i] = player_y
 
         # Update the ball position prediction array
@@ -265,6 +269,46 @@ class rod:
                 tran, tran_vel, rot, rot_vel = 0.5, 0.5, 0, 0.5
 
         return {"driveID": int(self.rod_id_command), "translationTargetPosition": tran, "translationVelocity": tran_vel, "rotationTargetPosition": rot, "rotationVelocity": rot_vel}
+
+
+class enemy_rod:
+    def __init__(self, rod_id: int):
+        rod: dict[str, int | str] = dict(GEOM["rods"][rod_id - 1])
+        self.rod_id: int = rod_id
+
+        self.players: int = int(rod["players"])
+        self.first_offset: int = int(rod["first_offset"])
+        self.spacing: int = int(rod["spacing"])
+        self.travel: int = int(rod["travel"])
+
+        self.player_min_y: list[int] = self.players * [int(0)]
+        self.player_max_y: list[int] = self.players * [int(0)]
+        for i in range(0, self.players):
+            self.player_min_y[i] = self.first_offset + self.spacing * i
+            self.player_max_y[i] = self.player_min_y[i] + self.travel
+
+        self.translation_r: float = float(0)  # Relative
+        self.translation_y: list[float] = self.players * [float(0)]
+        self.translation_vr: float = float(0)
+        self.translation_vy: list[float] = self.players * [float(0)]
+
+        self.rotation: float = float(0)
+        self.rotation_vel: float = float(0)
+
+    def update_variables(self, cam_data: dict[str, float]):
+        self.translation_vr = (cam_data[f"rod{self.rod_id - 1}_item1"] - self.translation_r) * FPS
+        self.translation_r = cam_data[f"rod{self.rod_id - 1}_item1"]
+
+        old_translation_y = self.translation_y.copy()
+
+        # Update the rod absolute pos from cam data
+        for i in range(0, self.players):
+            player_y: float = self.player_min_y[i] + self.travel * self.translation_r
+            self.translation_y[i] = player_y
+            self.translation_vy[i] = (player_y - old_translation_y[i]) * FPS
+
+        self.rotation_vel = (cam_data[f"rod{self.rod_id - 1}_item1"] - self.rotation) * FPS
+        self.rotation = cam_data[f"rod{self.rod_id - 1}_item1"]
 
 
 def merge_cam_data(cam_data0: dict[str, float], cam_data1: dict[str, float]) -> dict[str, float]:
@@ -371,6 +415,7 @@ def rod_worker(rod_id: int, in_q: mp.Queue, out_q: mp.Queue):
 def main():
     ctx = mp.get_context("spawn")
     rod_ids = [1, 2, 4, 6]
+
     in_queues = {rid: ctx.Queue(maxsize=1) for rid in rod_ids}
     out_queue = ctx.Queue()
 
@@ -381,6 +426,11 @@ def main():
 
     for p in procs:
         p.start()
+
+    rod_3 = enemy_rod(3)
+    rod_5 = enemy_rod(5)
+    rod_7 = enemy_rod(7)
+    rod_8 = enemy_rod(8)
 
     session = requests.Session()
 
@@ -405,6 +455,11 @@ def main():
                     except Exception:
                         break
                 q.put_nowait(merged_cam_data)
+
+            rod_3.update_variables(merged_cam_data)
+            rod_5.update_variables(merged_cam_data)
+            rod_7.update_variables(merged_cam_data)
+            rod_8.update_variables(merged_cam_data)
 
             commands = [out_queue.get() for _ in rod_ids]
             payload = {"commands": commands}
