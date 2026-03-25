@@ -112,7 +112,7 @@ class rod:
             self.driveID = 4
 
         # State of the rod
-        self.state: int = 0
+        self.state: str = "idle"
 
         # Geometry attributes of rod
         rod: RodGeom = GEOM["rods"][rod_id - 1]
@@ -149,6 +149,8 @@ class rod:
         # Ball not in play:
         ball_x = cam_data["ball_x"]
         ball_y = cam_data["ball_y"]
+        ball_vx = cam_data["ball_vx"]
+        ball_vy = cam_data["ball_vy"]
 
         # Ball is not in play
         if not (0 <= ball_x <= 1210 and 0 <= ball_y <= 700):
@@ -157,11 +159,11 @@ class rod:
 
         # Ball position
         if 0 <= ball_x < self.position - REACH:
-            self.state = 1
+            self.state = "avoid"
         elif self.position - REACH <= ball_x < self.position + REACH:
-            self.state = 2
+            self.state = "possession"
         elif self.position + REACH < ball_x:
-            self.state = 3
+            self.state = "defend"
 
     def update_variables(self, cam_data: CamFrame):
         """
@@ -307,7 +309,6 @@ class rod:
         return [self.ball_pred_pos[i] for i in sorted_list]
 
     def attack(self, field_state: FieldStateMerged) -> tuple[float, float, float, float]:
-        # TODO: If the ball y velocity is low and the players are in line, then do not shoot the ball head on, but rather shoot it from the side.
         cam_data = field_state["camData"]
         ball_x = cam_data["ball_x"]
         ball_y = cam_data["ball_y"]
@@ -370,9 +371,18 @@ class rod:
         cam_data = field_state["camData"]
         ball_x = cam_data["ball_x"]
         ball_y = cam_data["ball_y"]
+
+        # Move goalie to the best defense position.
+        sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
+        _, ball_y = sorted_ball_pos[0]
         translation_r = self.move_any_player_to_y(ball_y)
-        rotation = self.move_any_player_to_x(ball_x)
-        rotation = max(0, rotation)
+
+        # If ball is in front of the goalie, shoot it.
+        if self.player_x < ball_x and abs(ball_y - self.translation_y[0]) < (PLAYER_WIDTH + BALL_SIZE) / 2:
+            rotation = -0.2
+        else:
+            rotation = self.move_any_player_to_x(ball_x)
+            rotation = max(0, rotation)
         return translation_r, 1, rotation, 1
 
     def avoid(self, field_state: FieldStateMerged) -> tuple[float, float, float, float]:
@@ -387,15 +397,20 @@ class rod:
         self.determine_state(cam_data)
 
         match self.state:
-            case 1:
-                tran, tran_vel, rot, rot_vel = self.avoid(field_state)
-            case 2:
-                tran, tran_vel, rot, rot_vel = self.attack(field_state)
-            case 3:
+            case "avoid":
                 if self.rod_id == 1:
                     tran, tran_vel, rot, rot_vel = self.goalie_defend(field_state)
                 else:
-                    tran, tran_vel, rot, rot_vel = self.defend(field_state)
+                    tran, tran_vel, rot, rot_vel = self.avoid(field_state)
+
+            case "possession":
+                if self.rod_id == 1:
+                    tran, tran_vel, rot, rot_vel = self.goalie_defend(field_state)
+                else:
+                    tran, tran_vel, rot, rot_vel = self.attack(field_state)
+
+            case "defend":
+                tran, tran_vel, rot, rot_vel = self.defend(field_state)
             case _:
                 tran, tran_vel, rot, rot_vel = 0, 0, 0, 0
 
