@@ -1,9 +1,11 @@
 # About
+
 We are the rolling balls.
 
 ![logo](logo.png)
 
 # Active Files
+
 - `mainRok.py`
 - `mainAlberim.py`
 - `defense_modul_v2.py`
@@ -12,6 +14,7 @@ We are the rolling balls.
 - `geometry.json`
 
 # Usage
+
 Run a match:
 
 ```bash
@@ -23,3 +26,10 @@ Compare two agents:
 ```bash
 python3 compare.py mainRok mainAlberim
 ```
+
+# TODO
+
+- [ ] Merge code from `alvi` branch.
+- [ ] Wind up before shoot.
+- [ ] Wall bounces when predicting ball position.
+- [ ] Hitting slow balls.
