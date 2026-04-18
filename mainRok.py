@@ -340,8 +340,6 @@ class rod:
             translation_r = self.move_any_player_to_y(ball_y - middle_bound)
             if any([(player_y + lower_bound < abs(ball_y) < player_y + upper_bound) for player_y in self.translation_y]):
                 return translation_r, 1, -0.25, 1
-            else:
-                return translation_r, 1, 0, 1
 
         player_behind_ball = (self.player_x < ball_x) and (abs(ball_x - self.player_x) < (REACH))
         player_in_line_with_ball = any([(ball_y - BALL_SIZE / 2 - PLAYER_WIDTH < abs(player_y) < ball_y + BALL_SIZE / 2 + PLAYER_WIDTH) for player_y in self.translation_y])
@@ -351,7 +349,7 @@ class rod:
         if player_behind_ball and player_in_line_with_ball:
             rotation = -0.2
         elif not player_in_line_with_ball:
-            rotation = self.move_any_player_to_x(ball_x - BALL_SIZE / 2)
+            rotation = self.move_any_player_to_x(ball_x - BALL_SIZE)
             rotation = max(0, rotation)
 
         return translation_r, 1, rotation, 1

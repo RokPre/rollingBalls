@@ -4,7 +4,6 @@ The public entrypoint is `main(sim_state)`, which makes this file importable by
 `compare.py` and `run.py`. Running the module directly still supports the
 external localhost HTTP loop for manual use outside the simulator process.
 """
-
 from __future__ import annotations
 
 import json

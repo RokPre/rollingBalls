@@ -6,7 +6,7 @@ from typing import Any
 
 import requests
 
-URL = "http://localhost:8080"
+URL = "http://127.0.0.0:8081"
 FPS = 50
 PERIOD = 1 / FPS
 REQUEST_TIMEOUT_S = 1.0

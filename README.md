@@ -29,7 +29,5 @@ python3 compare.py mainRok mainAlberim
 
 # TODO
 
-- [ ] Merge code from `alvi` branch.
-- [ ] Wind up before shoot.
 - [ ] Wall bounces when predicting ball position.
 - [ ] Hitting slow balls.
