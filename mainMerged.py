@@ -70,10 +70,15 @@ GOAL_MID_Y = FIELD_Y / 2.0
 CORNER_PAD = 0.3 * BALL_SIZE
 
 ROT_BLOCK = 0.0
-ROT_LIFT = 0.25
+ROT_LIFT = 0.2
 ROT_STRIKE = -0.25
 ROT_VEL = 1.0
 TRANS_VEL = 1.0
+
+# Higher value, lower windup.
+# The equation for the windup is 1/(abs(ball_vy) / WINDUP_CONST) * BALL_SIZE.
+# This is how much the players x gets decreased so to stay in front of the ball.
+WINDUP_CONST = 0.6
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -188,14 +193,19 @@ class Rod:
         return [self.ball_pred_pos[i] for i in sorted_list]
 
     def can_shoot(self, ball_x: float, ball_y: float) -> bool:
-        ball_in_front_of_player = any(
-            abs(py - ball_y) < (BALL_SIZE / 2 + PLAYER_WIDTH / 2)
+        ball_in_line_of_player = any(
+            abs(py - ball_y) < (BALL_SIZE / 2 + PLAYER_WIDTH)
             for py in self.translation_y
         )
-        return (self.player_x < ball_x) and ball_in_front_of_player
+        ball_in_reach_of_player = (self.player_x < ball_x < self.position + REACH)
+        return ball_in_line_of_player and ball_in_reach_of_player
 
     def attack(self, ball_x: float, ball_y: float, ball_vx: float, ball_vy: float) -> tuple[float, float, float, float]:
         translation_r = self.move_any_player_to_y(ball_y)
+        if ball_vy != 0:
+            ball_vy = 0.0001
+        windup_factor = 1 / (abs(ball_vy) / WINDUP_CONST)
+        rotation = self.move_any_player_to_x(ball_x - windup_factor * BALL_SIZE)  # Wind up before shoot.
 
         # Ball is slow, hit it so that it does not get stuck.
         if abs(ball_vx) < 0.05 and abs(ball_vy) < 0.05 and self.can_shoot(ball_x, ball_y):
@@ -214,29 +224,33 @@ class Rod:
             translation_r = self.move_any_player_to_y(ball_y - middle_bound)
             if any(player_y + lower_bound < ball_y < player_y + upper_bound for player_y in self.translation_y):
                 return translation_r, 1.0, ROT_STRIKE, 1.0
-
-        if self.can_shoot(ball_x, ball_y):
-            rotation = -0.2
-        else:
-            rotation = self.move_any_player_to_x(ball_x - BALL_SIZE)  # Wind up before shoot.
-            rotation = max(0.0, rotation)
-
-        return translation_r, 1.0, rotation, 1.0
-
-    def pass_forward(self, ball_x: float, ball_y: float) -> tuple[float, float, float, float]:
-        translation_r = self.move_any_player_to_y(ball_y)
-        if self.can_shoot(ball_x, ball_y):
-            return translation_r, 1.0, -0.2, 1.0
+            else:
+                return translation_r, 1.0, rotation, 1.0
 
         if self.can_shoot(ball_x, ball_y):
             rotation = ROT_STRIKE
         else:
-            rotation = self.move_any_player_to_x(ball_x - BALL_SIZE)  # Wind up before shoot.
+            rotation = max(0.0, rotation)
+
+        return translation_r, 1.0, rotation, 1.0
+
+    def pass_forward(self, ball_x: float, ball_y: float, ball_vx: float, ball_vy: float) -> tuple[float, float, float, float]:
+        translation_r = self.move_any_player_to_y(ball_y)
+        # If the ball is moving slowly in the y direction, shoot it diagonally.
+        if abs(ball_vy) < 0.03:
+            return self.attack(ball_x, ball_y, ball_vx, ball_vy)
+        if self.can_shoot(ball_x, ball_y):
+            return translation_r, 1.0, ROT_STRIKE, 1.0
+        else:
+            if ball_vy != 0:
+                ball_vy = 0.0001
+            windup_factor = 1 / (abs(ball_vy) / WINDUP_CONST)
+            rotation = self.move_any_player_to_x(ball_x - windup_factor * BALL_SIZE)  # Wind up before shoot.
 
         rotation_v = abs(self.player_x - ball_x) / (REACH / 2)
         return translation_r, 1.0, rotation, rotation_v
 
-    def offense_defend(self, ball_x: float, ball_vx: float) -> tuple[float, float, float, float]:
+    def offense_defend(self, ball_x: float) -> tuple[float, float, float, float]:
         sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
         _, predicted_y = sorted_ball_pos[0]
         translation_r = self.move_any_player_to_y(predicted_y)
@@ -248,6 +262,11 @@ class Rod:
         return translation_r, 1.0, ROT_BLOCK, 1.0
 
     def offense_avoid(self, ball_x: float) -> tuple[float, float, float, float]:
+        """
+        Move the players, so that one of them is in line with the ball on the y axis, but keep them lifted up.
+        This is when the ball is at the back of the rod, and players need to start attacking soon.
+        They are constantly moving on the y axis to be in position to attack.
+        """
         sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
         _, predicted_y = sorted_ball_pos[0]
         translation_r = self.move_any_player_to_y(predicted_y)
@@ -287,33 +306,47 @@ class Rod:
                 best_cal = cal
         return best_cal
 
-    def slow_ball_is_dangerous(self, ball_x: float, ball_vx: float) -> bool:
-        return ball_x < 320.0 and ball_vx < 120.0
+    def goalie_defend(self, ball_x: float, ball_y: float) -> tuple[float, float, float, float]:
+        """
+        Goalie defend has two modes:
+        1. When the ball is far away, "park" the goalie at the appropriate goal post.
+        2. When the ball is close, track the ball and defend it.
+        """
+        ball_is_close = ball_x < 420.0
+        if ball_is_close:
+            sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
+            _, ball_y = sorted_ball_pos[0]
+            translation_r = self.move_any_player_to_y(ball_y)
+        else:
+            target_y, _ = self.defense_targets(ball_y)
+            translation_r = self.rod_translation_for_target_y(target_y)
 
-    def goalie_defend(self, ball_x: float, ball_y: float, ball_vx: float) -> tuple[float, float, float, float]:
-        keeper_y, _ = self.defense_targets(ball_y)
-        target_y = ball_y if self.slow_ball_is_dangerous(ball_x, ball_vx) else keeper_y
-        translation_r = self.rod_translation_for_target_y(target_y)
-
-        aligned = abs(ball_y - self.translation_y[0]) < (PLAYER_WIDTH + BALL_SIZE) / 2
-        if self.player_x < ball_x and aligned and abs(ball_x - self.position) < 65:
+        if self.can_shoot(ball_x, ball_y):
             rotation = ROT_STRIKE
         else:
-            rotation = self.move_any_player_to_x(ball_x)
-            rotation = max(0.0, rotation)
+            rotation = self.move_any_player_to_x(ball_x - BALL_SIZE / 2)
+            rotation = max(ROT_BLOCK, rotation)
 
         return translation_r, TRANS_VEL, rotation, ROT_VEL
 
-    def defender_cover(self, ball_x: float, ball_y: float, ball_vx: float) -> tuple[float, float, float, float]:
-        _, defender_y = self.defense_targets(ball_y)
-        target_y = ball_y if self.slow_ball_is_dangerous(ball_x, ball_vx) else defender_y
-        translation_r = self.rod_translation_for_target_y(target_y)
+    def defender_cover(self, ball_x: float, ball_y: float, ball_vx: float, ball_vy: float) -> tuple[float, float, float, float]:
+        ball_is_close = ball_x < 420.0
+        if ball_is_close:
+            sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
+            _, ball_y = sorted_ball_pos[0]
+            translation_r = self.move_any_player_to_y(ball_y)
+        else:
+            _, target_y = self.defense_targets(ball_y)
+            translation_r = self.rod_translation_for_target_y(target_y)
 
-        aligned = any(abs(ball_y - py) < (PLAYER_WIDTH + BALL_SIZE) / 2 for py in self.translation_y)
-        if aligned and abs(ball_x - self.position) < 70:
+        if self.can_shoot(ball_x, ball_y):
             rotation = ROT_STRIKE
         else:
-            rotation = ROT_BLOCK
+            rotation = self.move_any_player_to_x(ball_x - BALL_SIZE / 2)
+            rotation = max(ROT_BLOCK, rotation)
+
+        if abs(ball_vy) < 0.03 and self.state == "possession":
+            return self.attack(ball_x, ball_y, ball_vx, ball_vy)
 
         return translation_r, TRANS_VEL, rotation, ROT_VEL
 
@@ -322,31 +355,38 @@ class Rod:
         self.update_variables(ball_x, ball_y, ball_vx, ball_vy, rod_pos, rod_rot)
         self.determine_state(ball_x, ball_y)
 
+        tran, rot, tran_vel, rot_vel = 0, 0, 0, 0
+
         if self.rod_id == 1:
             if self.state in {"avoid", "possession", "defend"}:
-                tran, tran_vel, rot, rot_vel = self.goalie_defend(ball_x, ball_y, ball_vx)
+                tran, tran_vel, rot, rot_vel = self.goalie_defend(ball_x, ball_y)
             else:
                 tran, tran_vel, rot, rot_vel = 0.5, 0.5, ROT_BLOCK, 0.5
         elif self.rod_id == 2:
             if self.state in {"possession", "defend"}:
-                tran, tran_vel, rot, rot_vel = self.defender_cover(ball_x, ball_y, ball_vx)
+                tran, tran_vel, rot, rot_vel = self.defender_cover(ball_x, ball_y, ball_vx, ball_vy)
             elif self.state == "avoid":
                 tran, tran_vel, rot, rot_vel = self.offense_avoid(ball_x)
             else:
                 tran, tran_vel, rot, rot_vel = 0.5, 0.5, ROT_BLOCK, 0.5
-        else:
-            match self.state:
-                case "avoid":
-                    tran, tran_vel, rot, rot_vel = self.offense_avoid(ball_x)
-                case "possession":
-                    if self.rod_id == 4:
-                        tran, tran_vel, rot, rot_vel = self.pass_forward(ball_x, ball_y)
-                    elif self.rod_id == 6:
-                        tran, tran_vel, rot, rot_vel = self.attack(ball_x, ball_y, ball_vx, ball_vy)
-                case "defend":
-                    tran, tran_vel, rot, rot_vel = self.offense_defend(ball_x, ball_vx)
-                case _:
-                    tran, tran_vel, rot, rot_vel = 0.0, 0.0, 0.0, 0.0
+        elif self.rod_id == 4:
+            if self.state == "avoid":
+                tran, tran_vel, rot, rot_vel = self.offense_avoid(ball_x)
+            elif self.state == "possession":
+                tran, tran_vel, rot, rot_vel = self.pass_forward(ball_x, ball_y, ball_vx, ball_vy)
+            elif self.state == "defend":
+                tran, tran_vel, rot, rot_vel = self.offense_defend(ball_x)
+            else:
+                tran, tran_vel, rot, rot_vel = 0.5, 0.5, ROT_BLOCK, 0.5
+        elif self.rod_id == 6:
+            if self.state == "avoid":
+                tran, tran_vel, rot, rot_vel = self.offense_avoid(ball_x)
+            elif self.state == "possession":
+                tran, tran_vel, rot, rot_vel = self.attack(ball_x, ball_y, ball_vx, ball_vy)
+            elif self.state == "defend":
+                tran, tran_vel, rot, rot_vel = self.offense_defend(ball_x)
+            else:
+                tran, tran_vel, rot, rot_vel = 0.5, 0.5, ROT_BLOCK, 0.5
 
         return (self.drive_id, tran, rot, tran_vel, rot_vel)
 

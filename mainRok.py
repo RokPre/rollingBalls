@@ -94,6 +94,21 @@ with open("geometry.json", "r", encoding="utf-8") as g:
     GEOM = cast(Geometry, json.load(g))
 
 BALL_SIZE: int = int(GEOM["ball_size"])
+FIELD_X = float(GEOM["field"]["dimension_x"])
+FIELD_Y = float(GEOM["field"]["dimension_y"])
+GOAL_W = float(GEOM["goal_width"])
+GOAL_TOP_Y = (FIELD_Y - GOAL_W) / 2.0
+GOAL_BOT_Y = (FIELD_Y + GOAL_W) / 2.0
+GOAL_MID_Y = FIELD_Y / 2.0
+CORNER_PAD = 0.3 * BALL_SIZE
+
+ROT_BLOCK = 0.0
+ROT_LIFT = 0.25
+ROT_STRIKE = -0.25
+ROT_VEL = 1.0
+TRANS_VEL = 1.0
+
+WINDUP_CONST = 0.7
 
 
 class rod:
@@ -306,74 +321,56 @@ class rod:
         return [self.ball_pred_pos[i] for i in sorted_list]
 
     def can_shoot(self, ball_x: float, ball_y: float) -> bool:
-        ball_in_front_of_player = any([abs(py - ball_y) < (BALL_SIZE / 2 + PLAYER_WIDTH / 2) for py in self.translation_y])
-        return self.player_x < ball_x and ball_in_front_of_player
+        ball_in_line_of_player = any(
+            abs(py - ball_y) < (BALL_SIZE / 2 + PLAYER_WIDTH / 2)
+            for py in self.translation_y
+        )
+        ball_in_reach_of_player = (self.player_x < ball_x < self.position + REACH)
+        return ball_in_line_of_player and ball_in_reach_of_player
 
-    def attack(self, ball_x: float, ball_y: float, ball_vx: float, ball_vy: float, rod_pos: list[float], rod_rot: list[float]) -> tuple[float, float, float, float]:
+    def attack(self, ball_x: float, ball_y: float, ball_vx: float, ball_vy: float) -> tuple[float, float, float, float]:
         translation_r = self.move_any_player_to_y(ball_y)
+        if ball_vy != 0:
+            ball_vy = 0.0001
+        windup_factor = 1 / (abs(ball_vy) / WINDUP_CONST)
+        rotation = self.move_any_player_to_x(ball_x - windup_factor * BALL_SIZE)  # Wind up before shoot.
 
-        enemy_rod_translation_r: float = rod_pos[self.rod_id]
+        # Ball is slow, hit it so that it does not get stuck.
+        if abs(ball_vx) < 0.05 and abs(ball_vy) < 0.05 and self.can_shoot(ball_x, ball_y):
+            return translation_r, 1.0, ROT_STRIKE, 1.0
 
-        enemy_geom = GEOM["rods"][self.rod_id - 1]
-        enemy_first_offset: int = int(enemy_geom["first_offset"])
-        enemy_players: int = int(enemy_geom["players"])
-        enemy_spacing: int = int(enemy_geom["spacing"])
-        enemy_travel: int = int(enemy_geom["travel"])
-
-        enemy_translation_y = [enemy_first_offset + enemy_spacing * i + enemy_travel * enemy_rod_translation_r for i in range(0, enemy_players)]
-
-        enemy_player_in_line_with_ball = any([(ball_y - BALL_SIZE / 2 - PLAYER_WIDTH < abs(player_y) < ball_y + BALL_SIZE / 2 + PLAYER_WIDTH) for player_y in enemy_translation_y])
-
-        # Shoot the ball of its verry slow, when it gets stuck.
-        if abs(ball_vx) < 0.05 and abs(ball_vy) < 0.05:
-            return translation_r, 1, -0.25, 1
         if abs(ball_vy) < 0.3:
-            if ball_y < GEOM["field"]["dimension_y"] / 2:
+            if ball_y < FIELD_Y / 2:
                 lower_bound = PLAYER_WIDTH / 2
                 upper_bound = lower_bound + BALL_SIZE / 2
                 middle_bound = (lower_bound + upper_bound) / 2
             else:
-                lower_bound = - PLAYER_WIDTH / 2 - BALL_SIZE / 2
+                lower_bound = -PLAYER_WIDTH / 2 - BALL_SIZE / 2
                 upper_bound = lower_bound + BALL_SIZE / 2
                 middle_bound = (lower_bound + upper_bound) / 2
 
             translation_r = self.move_any_player_to_y(ball_y - middle_bound)
-            if any([(player_y + lower_bound < abs(ball_y) < player_y + upper_bound) for player_y in self.translation_y]):
-                return translation_r, 1, -0.25, 1
+            if any(player_y + lower_bound < ball_y < player_y + upper_bound for player_y in self.translation_y):
+                return translation_r, 1.0, ROT_STRIKE, 1.0
+            else:
+                return translation_r, 1.0, rotation, 1.0
 
-        player_behind_ball = (self.player_x < ball_x) and (abs(ball_x - self.player_x) < (REACH))
-        player_in_line_with_ball = any([(ball_y - BALL_SIZE / 2 - PLAYER_WIDTH < abs(player_y) < ball_y + BALL_SIZE / 2 + PLAYER_WIDTH) for player_y in self.translation_y])
+        if self.can_shoot(ball_x, ball_y):
+            rotation = ROT_STRIKE
+        else:
+            rotation = max(0.0, rotation)
 
-        # Player can shoot the ball.
-        rotation = 0
-        if player_behind_ball and player_in_line_with_ball:
-            rotation = -0.2
-        elif not player_in_line_with_ball:
-            rotation = self.move_any_player_to_x(ball_x - BALL_SIZE)
-            rotation = max(0, rotation)
+        return translation_r, 1.0, rotation, 1.0
 
-        return translation_r, 1, rotation, 1
-
-    def defend(self, ball_x: float) -> tuple[float, float, float, float]:
-        sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
-        _, ball_y = sorted_ball_pos[0]
-        translation_r = self.move_any_player_to_y(ball_y)
-
-        distance_to_ball = abs(ball_x - self.position) / (1210)
-        limit = (1 - distance_to_ball) / 2
-        translation_r = min(max(translation_r, 0.5 - limit), 0.5 + limit)
-
-        return translation_r, 1, 0, 1
-
-    def goalie_defend(self, ball_x: float, ball_y: float) -> tuple[float, float, float, float]:
+    def defend(self, ball_x: float, ball_y: float) -> tuple[float, float, float, float]:
         # Move goalie to the best defense position.
         sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
         _, ball_y = sorted_ball_pos[0]
         translation_r = self.move_any_player_to_y(ball_y)
 
         # If ball is in front of the goalie, shoot it.
-        if self.player_x < ball_x and abs(ball_y - self.translation_y[0]) < (PLAYER_WIDTH + BALL_SIZE) / 2:
-            rotation = -0.2
+        if self.can_shoot(ball_x, ball_y):
+            rotation = ROT_STRIKE
         else:
             rotation = self.move_any_player_to_x(ball_x)
             rotation = max(0, rotation)
@@ -407,22 +404,22 @@ class rod:
         match self.state:
             case "avoid":
                 if self.rod_id == 1:
-                    tran, tran_vel, rot, rot_vel = self.goalie_defend(ball_x, ball_y)
+                    tran, tran_vel, rot, rot_vel = self.defend(ball_x, ball_y)
                 else:
                     tran, tran_vel, rot, rot_vel = self.avoid(ball_y)
 
             case "possession":
                 if self.rod_id == 1:
-                    tran, tran_vel, rot, rot_vel = self.goalie_defend(ball_x, ball_y)
+                    tran, tran_vel, rot, rot_vel = self.defend(ball_x, ball_y)
                 elif self.rod_id == 6:
-                    tran, tran_vel, rot, rot_vel = self.attack(ball_x, ball_y, ball_vx, ball_vy, rod_pos, rod_rot)
+                    tran, tran_vel, rot, rot_vel = self.attack(ball_x, ball_y, ball_vx, ball_vy)
                 else:
                     tran, tran_vel, rot, rot_vel = self.pass_forward(ball_x, ball_y)
 
             case "defend":
-                tran, tran_vel, rot, rot_vel = self.defend(ball_x)
+                tran, tran_vel, rot, rot_vel = self.defend(ball_x, ball_y)
             case _:
-                tran, tran_vel, rot, rot_vel = 0, 0, 0, 0
+                tran, tran_vel, rot, rot_vel = 0.5, 0, 0, 0
 
         return (self.driveID, tran, rot, tran_vel, rot_vel)
 
