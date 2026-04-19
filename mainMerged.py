@@ -80,6 +80,8 @@ TRANS_VEL = 1.0
 # This is how much the players x gets decreased so to stay in front of the ball.
 WINDUP_CONST = 0.6
 
+SHOOT_CONST = 0.3
+
 
 def clamp(x: float, lo: float, hi: float) -> float:
     return lo if x < lo else hi if x > hi else x
@@ -192,9 +194,11 @@ class Rod:
         )
         return [self.ball_pred_pos[i] for i in sorted_list]
 
-    def can_shoot(self, ball_x: float, ball_y: float) -> bool:
+    def can_shoot(self, ball_x: float, ball_y: float, ball_vy: float) -> bool:
+        shoot_factor = 1 / (abs(ball_vy) / SHOOT_CONST)
+        shoot_factor = max(shoot_factor, 1 / 2)
         ball_in_line_of_player = any(
-            abs(py - ball_y) < (BALL_SIZE / 2 + PLAYER_WIDTH)
+            abs(py - ball_y) < (BALL_SIZE / 2 + PLAYER_WIDTH * shoot_factor)
             for py in self.translation_y
         )
         ball_in_reach_of_player = (self.player_x < ball_x < self.position + REACH)
@@ -208,7 +212,7 @@ class Rod:
         rotation = self.move_any_player_to_x(ball_x - windup_factor * BALL_SIZE)  # Wind up before shoot.
 
         # Ball is slow, hit it so that it does not get stuck.
-        if abs(ball_vx) < 0.05 and abs(ball_vy) < 0.05 and self.can_shoot(ball_x, ball_y):
+        if abs(ball_vx) < 0.05 and abs(ball_vy) < 0.05 and self.can_shoot(ball_x, ball_y, ball_vy):
             return translation_r, 1.0, ROT_STRIKE, 1.0
 
         if abs(ball_vy) < 0.3:
@@ -227,7 +231,7 @@ class Rod:
             else:
                 return translation_r, 1.0, rotation, 1.0
 
-        if self.can_shoot(ball_x, ball_y):
+        if self.can_shoot(ball_x, ball_y, ball_vy):
             rotation = ROT_STRIKE
         else:
             rotation = max(0.0, rotation)
@@ -239,7 +243,7 @@ class Rod:
         # If the ball is moving slowly in the y direction, shoot it diagonally.
         if abs(ball_vy) < 0.03:
             return self.attack(ball_x, ball_y, ball_vx, ball_vy)
-        if self.can_shoot(ball_x, ball_y):
+        if self.can_shoot(ball_x, ball_y, ball_vy):
             return translation_r, 1.0, ROT_STRIKE, 1.0
         else:
             if ball_vy != 0:
@@ -306,7 +310,7 @@ class Rod:
                 best_cal = cal
         return best_cal
 
-    def goalie_defend(self, ball_x: float, ball_y: float) -> tuple[float, float, float, float]:
+    def goalie_defend(self, ball_x: float, ball_y: float, ball_vy: float) -> tuple[float, float, float, float]:
         """
         Goalie defend has two modes:
         1. When the ball is far away, "park" the goalie at the appropriate goal post.
@@ -321,7 +325,7 @@ class Rod:
             target_y, _ = self.defense_targets(ball_y)
             translation_r = self.rod_translation_for_target_y(target_y)
 
-        if self.can_shoot(ball_x, ball_y):
+        if self.can_shoot(ball_x, ball_y, ball_vy):
             rotation = ROT_STRIKE
         else:
             rotation = self.move_any_player_to_x(ball_x - BALL_SIZE / 2)
@@ -339,7 +343,7 @@ class Rod:
             _, target_y = self.defense_targets(ball_y)
             translation_r = self.rod_translation_for_target_y(target_y)
 
-        if self.can_shoot(ball_x, ball_y):
+        if self.can_shoot(ball_x, ball_y, ball_vy):
             rotation = ROT_STRIKE
         else:
             rotation = self.move_any_player_to_x(ball_x - BALL_SIZE / 2)
@@ -359,7 +363,7 @@ class Rod:
 
         if self.rod_id == 1:
             if self.state in {"avoid", "possession", "defend"}:
-                tran, tran_vel, rot, rot_vel = self.goalie_defend(ball_x, ball_y)
+                tran, tran_vel, rot, rot_vel = self.goalie_defend(ball_x, ball_y, ball_vy)
             else:
                 tran, tran_vel, rot, rot_vel = 0.5, 0.5, ROT_BLOCK, 0.5
         elif self.rod_id == 2:
