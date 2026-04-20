@@ -78,9 +78,9 @@ TRANS_VEL = 1.0
 # Higher value, lower windup.
 # The equation for the windup is 1/(abs(ball_vy) / WINDUP_CONST) * BALL_SIZE.
 # This is how much the players x gets decreased so to stay in front of the ball.
-WINDUP_CONST = 0.6
-
-SHOOT_CONST = 0.3
+WINDUP_CONST = 0.7
+SHOOT_CONST = 0.5
+DIAGONAL_SHOOT_THRESHOLD = 0.06
 
 
 def clamp(x: float, lo: float, hi: float) -> float:
@@ -210,6 +210,7 @@ class Rod:
             ball_vy = 0.0001
         windup_factor = 1 / (abs(ball_vy) / WINDUP_CONST)
         rotation = self.move_any_player_to_x(ball_x - windup_factor * BALL_SIZE)  # Wind up before shoot.
+        rotation = min(rotation, ROT_LIFT)
 
         # Ball is slow, hit it so that it does not get stuck.
         if abs(ball_vx) < 0.05 and abs(ball_vy) < 0.05 and self.can_shoot(ball_x, ball_y, ball_vy):
@@ -241,7 +242,7 @@ class Rod:
     def pass_forward(self, ball_x: float, ball_y: float, ball_vx: float, ball_vy: float) -> tuple[float, float, float, float]:
         translation_r = self.move_any_player_to_y(ball_y)
         # If the ball is moving slowly in the y direction, shoot it diagonally.
-        if abs(ball_vy) < 0.03:
+        if abs(ball_vy) < DIAGONAL_SHOOT_THRESHOLD:
             return self.attack(ball_x, ball_y, ball_vx, ball_vy)
         if self.can_shoot(ball_x, ball_y, ball_vy):
             return translation_r, 1.0, ROT_STRIKE, 1.0
@@ -250,6 +251,7 @@ class Rod:
                 ball_vy = 0.0001
             windup_factor = 1 / (abs(ball_vy) / WINDUP_CONST)
             rotation = self.move_any_player_to_x(ball_x - windup_factor * BALL_SIZE)  # Wind up before shoot.
+            rotation = min(rotation, ROT_LIFT)
 
         rotation_v = abs(self.player_x - ball_x) / (REACH / 2)
         return translation_r, 1.0, rotation, rotation_v
@@ -349,7 +351,7 @@ class Rod:
             rotation = self.move_any_player_to_x(ball_x - BALL_SIZE / 2)
             rotation = max(ROT_BLOCK, rotation)
 
-        if abs(ball_vy) < 0.03 and self.state == "possession":
+        if abs(ball_vy) < DIAGONAL_SHOOT_THRESHOLD and self.state == "possession":
             return self.attack(ball_x, ball_y, ball_vx, ball_vy)
 
         return translation_r, TRANS_VEL, rotation, ROT_VEL
