@@ -192,40 +192,40 @@ def run_external(module_name: str) -> None:
     next_tick_s: float | None = None
 
     while True:
-        # try:
-        state_response = session.get(f"{URL}/State", timeout=REQUEST_TIMEOUT_S)
-        state_response.raise_for_status()
-        field_state = state_response.json()
+        try:
+            state_response = session.get(f"{URL}/State", timeout=REQUEST_TIMEOUT_S)
+            state_response.raise_for_status()
+            field_state = state_response.json()
 
-        if not field_state.get("motorsReady", True):
+            if not field_state.get("motorsReady", True):
+                next_tick_s = sleep_until_next_tick(next_tick_s)
+                continue
+
+            merged_cam_data = merge_cam_data(field_state)
+            # print(merged_cam_data)
+
+            module_commands = module.main(merged_cam_data)
+            payload = {"commands": normalize_motor_commands(module_commands)}
+            # print(payload)
+            # print("------")
+
+            command_response = session.post(
+                f"{URL}/Motors/SendCommand",
+                json=payload,
+                timeout=REQUEST_TIMEOUT_S,
+            )
+            command_response.raise_for_status()
+
             next_tick_s = sleep_until_next_tick(next_tick_s)
-            continue
 
-        merged_cam_data = merge_cam_data(field_state)
-        # print(merged_cam_data)
-
-        module_commands = module.main(merged_cam_data)
-        payload = {"commands": normalize_motor_commands(module_commands)}
-        # print(payload)
-        # print("------")
-
-        command_response = session.post(
-            f"{URL}/Motors/SendCommand",
-            json=payload,
-            timeout=REQUEST_TIMEOUT_S,
-        )
-        command_response.raise_for_status()
-
-        next_tick_s = sleep_until_next_tick(next_tick_s)
-
-        # except KeyboardInterrupt:
-        #     return
-        # except requests.RequestException as error:
-        #     print(f"HTTP error: {error}")
-        #     next_tick_s = sleep_until_next_tick(next_tick_s)
-        # except (KeyError, TypeError, ValueError, IndexError) as error:
-        #     print(f"State parsing error: {error}")
-        #     next_tick_s = sleep_until_next_tick(next_tick_s)
+        except KeyboardInterrupt:
+            return
+        except requests.RequestException as error:
+            print(f"HTTP error: {error}")
+            next_tick_s = sleep_until_next_tick(next_tick_s)
+        except (KeyError, TypeError, ValueError, IndexError) as error:
+            print(f"State parsing error: {error}")
+            next_tick_s = sleep_until_next_tick(next_tick_s)
 
 
 if __name__ == "__main__":
