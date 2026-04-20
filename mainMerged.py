@@ -28,6 +28,7 @@ PLAYER_HEIGHT = 74.48
 PLAYER_WIDTH = 20
 BALL_PRED_COUNT = 500
 REACH = 50
+BALL_IS_CLOSE_THRESHOLD = 1210
 
 
 class RodGeom(TypedDict):
@@ -64,8 +65,8 @@ BALL_SIZE = int(GEOM["ball_size"])
 FIELD_X = float(GEOM["field"]["dimension_x"])
 FIELD_Y = float(GEOM["field"]["dimension_y"])
 GOAL_W = float(GEOM["goal_width"])
-GOAL_TOP_Y = (FIELD_Y - GOAL_W) / 2.0
-GOAL_BOT_Y = (FIELD_Y + GOAL_W) / 2.0
+GOAL_TOP_Y = (FIELD_Y + GOAL_W) / 2.0
+GOAL_BOT_Y = (FIELD_Y - GOAL_W) / 2.0
 GOAL_MID_Y = FIELD_Y / 2.0
 CORNER_PAD = 0.3 * BALL_SIZE
 
@@ -78,8 +79,8 @@ TRANS_VEL = 1.0
 # Higher value, lower windup.
 # The equation for the windup is 1/(abs(ball_vy) / WINDUP_CONST) * BALL_SIZE.
 # This is how much the players x gets decreased so to stay in front of the ball.
-WINDUP_CONST = 0.7
-SHOOT_CONST = 0.5
+WINDUP_CONST = 0.6
+SHOOT_CONST = 0.4
 DIAGONAL_SHOOT_THRESHOLD = 0.06
 
 
@@ -312,17 +313,43 @@ class Rod:
                 best_cal = cal
         return best_cal
 
-    def goalie_defend(self, ball_x: float, ball_y: float, ball_vy: float) -> tuple[float, float, float, float]:
+    def line_between_ball_and_goal(self, ball_x: float, ball_y: float) -> tuple[float, float]:
+        goal_center_x = 0
+        goal_center_y = GOAL_MID_Y
+
+        goalie_x = GEOM["rods"][0]["position"]
+        defender_x = GEOM["rods"][1]["position"]
+
+        if (ball_x - goal_center_x) != 0:
+            m = (ball_y - goal_center_y) / (ball_x - goal_center_x)
+        else:
+            m = (ball_y - goal_center_y) / (ball_x - goal_center_x + 0.00001)
+
+        y_at_goalie_x = ball_y + m * (goalie_x - ball_x)
+        y_at_defender_x = ball_y + m * (defender_x - ball_x)
+
+        if ball_y < GOAL_MID_Y:
+            y_at_goalie_x = y_at_goalie_x + PLAYER_WIDTH / 0.75
+            y_at_defender_x = y_at_defender_x - PLAYER_WIDTH / 0.75
+        else:
+            y_at_goalie_x = y_at_goalie_x - PLAYER_WIDTH / 0.75
+            y_at_defender_x = y_at_defender_x + PLAYER_WIDTH / 0.75
+
+        return y_at_goalie_x, y_at_defender_x
+
+    def goalie_defend(self, ball_x: float, ball_y: float, ball_vx: float, ball_vy: float) -> tuple[float, float, float, float]:
         """
         Goalie defend has two modes:
         1. When the ball is far away, "park" the goalie at the appropriate goal post.
         2. When the ball is close, track the ball and defend it.
         """
-        ball_is_close = ball_x < 420.0
+        ball_is_close = ball_x < BALL_IS_CLOSE_THRESHOLD
         if ball_is_close:
-            sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
-            _, ball_y = sorted_ball_pos[0]
-            translation_r = self.move_any_player_to_y(ball_y)
+            # sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
+            # _, ball_y = sorted_ball_pos[0]
+            # translation_r = self.move_any_player_to_y(ball_y)
+            target_y, _ = self.line_between_ball_and_goal(ball_x, ball_y)
+            translation_r = self.rod_translation_for_target_y(target_y)
         else:
             target_y, _ = self.defense_targets(ball_y)
             translation_r = self.rod_translation_for_target_y(target_y)
@@ -336,11 +363,13 @@ class Rod:
         return translation_r, TRANS_VEL, rotation, ROT_VEL
 
     def defender_cover(self, ball_x: float, ball_y: float, ball_vx: float, ball_vy: float) -> tuple[float, float, float, float]:
-        ball_is_close = ball_x < 420.0
+        ball_is_close = ball_x < BALL_IS_CLOSE_THRESHOLD
         if ball_is_close:
-            sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
-            _, ball_y = sorted_ball_pos[0]
-            translation_r = self.move_any_player_to_y(ball_y)
+            # sorted_ball_pos = self.ball_pred_pos_from_x(self.position)
+            # _, ball_y = sorted_ball_pos[0]
+            # translation_r = self.move_any_player_to_y(ball_y)
+            _, target_y = self.line_between_ball_and_goal(ball_x, ball_y)
+            translation_r = self.rod_translation_for_target_y(target_y)
         else:
             _, target_y = self.defense_targets(ball_y)
             translation_r = self.rod_translation_for_target_y(target_y)
@@ -365,7 +394,7 @@ class Rod:
 
         if self.rod_id == 1:
             if self.state in {"avoid", "possession", "defend"}:
-                tran, tran_vel, rot, rot_vel = self.goalie_defend(ball_x, ball_y, ball_vy)
+                tran, tran_vel, rot, rot_vel = self.goalie_defend(ball_x, ball_y, ball_vx, ball_vy)
             else:
                 tran, tran_vel, rot, rot_vel = 0.5, 0.5, ROT_BLOCK, 0.5
         elif self.rod_id == 2:

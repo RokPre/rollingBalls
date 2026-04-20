@@ -5,7 +5,9 @@ from typing import Any
 
 import requests
 
-URL = "http://192.168.90.149:8000"
+# URL = "http://192.168.90.149:8000"
+URL = "http://192.168.90.132:24003"
+# URL = "http://localhost:8080"
 FPS = 50
 PERIOD = 1 / FPS
 REQUEST_TIMEOUT_S = 1.0
@@ -70,8 +72,8 @@ def merge_cam_data(field_state: dict[str, Any]) -> tuple[float, float, float, fl
     cam_0 = cam_data[0]
     cam_1 = cam_data[1]
 
-    cam_0_valid = cam_0.get("dataValid", False)
-    cam_1_valid = cam_1.get("dataValid", False)
+    cam_0_valid = cam_0.get("dataValid", True)
+    cam_1_valid = cam_1.get("dataValid", True)
 
     if cam_0_valid and cam_1_valid:
         pass
@@ -85,15 +87,15 @@ def merge_cam_data(field_state: dict[str, Any]) -> tuple[float, float, float, fl
     cam_0_ball_size = cam_0.get("ball_size")
     cam_1_ball_size = cam_1.get("ball_size")
 
-    if cam_0_ball_size is None or cam_1_ball_size is None:
-        return prev_cam_data
-    if cam_0_ball_size == 0 or cam_1_ball_size == 0:
-        return prev_cam_data
-
     if cam_0_ball_size < 0:
         cam_0_ball_size = 0.0
     if cam_1_ball_size < 0:
         cam_1_ball_size = 0.0
+
+    if cam_0_ball_size is None or cam_1_ball_size is None:
+        return prev_cam_data
+    if cam_0_ball_size == 0 and cam_1_ball_size == 0:
+        return prev_cam_data
 
     total_ball_size = cam_0_ball_size + cam_1_ball_size
 
@@ -206,7 +208,6 @@ def run_external(module_name: str) -> None:
 
             module_commands = module.main(merged_cam_data)
             payload = {"commands": normalize_motor_commands(module_commands)}
-            # print(payload)
             # print("------")
 
             command_response = session.post(

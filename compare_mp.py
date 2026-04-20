@@ -1,11 +1,11 @@
+"""Run compare simulations in parallel and merge the final data."""
 import importlib
 import json
+import multiprocessing as mp
+import os
 import sys
 from math import hypot
-from threading import Thread
-
-import fuzbai_simulator as fs
-import numpy as np
+from statistics import fmean
 
 with open("geometry.json", "r", encoding="utf-8") as geometry_file:
     GEOM = json.load(geometry_file)
@@ -20,139 +20,153 @@ SHOT_X_WINDOW_MM = 50.0
 SHOT_MIN_SPEED_MPS = 0.7
 SHOT_MIN_SPEED_GAIN_MPS = 0.35
 SHOT_COOLDOWN_STEPS = 3
-
-score = (0, 0)
-ball_pos = []
-ball_vel = []
-
-
-def physics(simulator: fs.FuzbAISimulator, red_team, blue_team):
-    global ball_pos
-    global ball_vel
-    while simulator.viewer_running():
-        # Terminated: goal scored or ball outside the field.
-        # Truncated: ball stopped moving.
-        if simulator.terminated() or simulator.truncated():
-            simulator.reset_simulation()
-
-        # Query delayed observation (actual measurement).
-        # (ball_x [mm], ball_y [mm], ball_vx [m/s], ball_vy [m/s], rod_positions [0, 1], rod_rotations [-64, 64])
-        if red_team != None:
-            red_obs = simulator.delayed_observation(fs.PlayerTeam.Red, None)
-            red_motor_commands = red_team(red_obs)
-            simulator.set_motor_command(red_motor_commands, fs.PlayerTeam.Red)
-
-        if blue_team != None:
-            blue_obs = simulator.delayed_observation(fs.PlayerTeam.Blue, None)
-            blue_motor_commnads = blue_team(blue_obs)
-            simulator.set_motor_command(blue_motor_commnads, fs.PlayerTeam.Blue)
-
-        ball_x, ball_y, ball_vx, ball_vy, _, _ = red_obs
-        ball_pos.append((ball_x, ball_y))
-        ball_vel.append((ball_vx, ball_vy))
-
-        # Move time forward in simulation.
-        simulator.step_simulation()
-
-        global score
-        if score != simulator.score():
-            score = simulator.score()
-            print("Score", score)
-        if simulator.score()[0] == 250 or simulator.score()[1] == 250:
-            print("Score", simulator.score())
-            analysis()
-            return
+GOAL_TARGET = 100
+PROGRESS = None
+PROGRESS_LOCK = None
 
 
-def main(file1: str, file2: str):
-    # Create a simulation instance.
-    # Multiple of these can exist, just not with the viewer enabled.
-    sim = fs.FuzbAISimulator(
-        # internal_step_factor: .step_simulation() = N * (2 ms)
-        # sample_steps: save state to delay buffer every N * (2 ms). .delayed_observation() returns discrete samples every N * 2ms.
+def _worker_count() -> int:
+    cpu_count = os.cpu_count() or 1
+    return max(1, int(cpu_count * 0.8))
+
+
+def _load_team(simulator, player_team, module_name: str, fs):
+    if module_name in {"internal", "", "builtin"}:
+        simulator.set_external_mode(player_team, False)
+        return None
+
+    simulator.set_external_mode(player_team, True)
+    return importlib.import_module(module_name).main
+
+
+def _init_worker(progress, progress_lock) -> None:
+    global PROGRESS
+    global PROGRESS_LOCK
+    PROGRESS = progress
+    PROGRESS_LOCK = progress_lock
+
+
+def _print_progress() -> None:
+    with PROGRESS_LOCK:
+        print("Progress", list(PROGRESS), flush=True)
+
+
+def _run_single_match(worker_id: int, file1: str, file2: str) -> dict[str, object]:
+    import fuzbai_simulator as fs
+
+    simulator = fs.FuzbAISimulator(
         internal_step_factor=10,
         sample_steps=5,
         realtime=False,
         simulated_delay_s=0.055,
         model_path=None,
         visual_config=fs.VisualConfig(
-            trace_length=0, trace_ball=False,
-            trace_rod_mask=0, enable_viewer=True
-        )
+            trace_length=0,
+            trace_ball=False,
+            trace_rod_mask=0,
+            enable_viewer=False,
+        ),
     )
 
-    # Disable the built-in agent on the red team.
-    if file1 == "internal" or file1 == "" or file1 == "builtin":
-        sim.set_external_mode(fs.PlayerTeam.Red, False)
-        red_team = None
-    else:
-        sim.set_external_mode(fs.PlayerTeam.Red, True)
-        module = importlib.import_module(file1)
-        red_team = module.main
-    if file2 == "internal" or file2 == "" or file2 == "builtin":
-        sim.set_external_mode(fs.PlayerTeam.Blue, False)
-        blue_team = None
-    else:
-        sim.set_external_mode(fs.PlayerTeam.Blue, True)
-        module = importlib.import_module(file2)
-        blue_team = module.main
+    red_team = _load_team(simulator, fs.PlayerTeam.Red, file1, fs)
+    blue_team = _load_team(simulator, fs.PlayerTeam.Blue, file2, fs)
 
-    # Start the physics simulation.
-    physics_thread = Thread(target=physics, args=(sim, red_team, blue_team))
-    physics_thread.start()
+    ball_pos: list[tuple[float, float]] = []
+    ball_vel: list[tuple[float, float]] = []
+    last_score = (0, 0)
 
-    # Control the viewer in the main thread.
-    # viewer = fs.ViewerProxy()
-    # viewer.render_loop()
-    # physics_thread.join()
+    while True:
+        if simulator.terminated() or simulator.truncated():
+            simulator.reset_simulation()
+
+        red_obs = simulator.delayed_observation(fs.PlayerTeam.Red, None)
+        if red_team is not None:
+            simulator.set_motor_command(red_team(red_obs), fs.PlayerTeam.Red)
+
+        if blue_team is not None:
+            blue_obs = simulator.delayed_observation(fs.PlayerTeam.Blue, None)
+            simulator.set_motor_command(blue_team(blue_obs), fs.PlayerTeam.Blue)
+
+        ball_x, ball_y, ball_vx, ball_vy, _, _ = red_obs
+        ball_pos.append((ball_x, ball_y))
+        ball_vel.append((ball_vx, ball_vy))
+
+        simulator.step_simulation()
+        score = tuple(simulator.score())
+        if score != last_score:
+            progress_index = 2 * (worker_id - 1)
+            PROGRESS[progress_index] = score[0]
+            PROGRESS[progress_index + 1] = score[1]
+            _print_progress()
+            last_score = score
+
+        if score[0] >= GOAL_TARGET or score[1] >= GOAL_TARGET:
+            return {
+                "worker_id": worker_id,
+                "score": score,
+                "ball_pos": ball_pos,
+                "ball_vel": ball_vel,
+            }
 
 
-def analysis():
-    global ball_pos
-    global ball_vel
-    global score
+def _merge_results(results: list[dict[str, object]]) -> tuple[tuple[int, int], list[tuple[float, float]], list[tuple[float, float]]]:
+    total_score = [0, 0]
+    ball_pos: list[tuple[float, float]] = []
+    ball_vel: list[tuple[float, float]] = []
 
+    for result in results:
+        red_score, blue_score = result["score"]
+        total_score[0] += red_score
+        total_score[1] += blue_score
+        ball_pos.extend(result["ball_pos"])
+        ball_vel.extend(result["ball_vel"])
+
+    return (total_score[0], total_score[1]), ball_pos, ball_vel
+
+
+def _mean(values: list[float]) -> float:
+    return float(fmean(values)) if values else 0.0
+
+
+def analysis(score: tuple[int, int], ball_pos: list[tuple[float, float]], ball_vel: list[tuple[float, float]]) -> None:
     if not ball_pos or not ball_vel:
         print("No match data collected.")
         return
 
     total_play_time_s = len(ball_pos) * OBSERVATION_PERIOD_S
-
-    # Average ball position x
-    ball_pos_x = np.mean([pos[0] for pos in ball_pos])
-    ball_vel_x = np.mean([vel[0] for vel in ball_vel])
-    ball_vel_y = np.mean([vel[1] for vel in ball_vel])
+    ball_pos_x = _mean([pos[0] for pos in ball_pos])
+    ball_vel_x = _mean([vel[0] for vel in ball_vel])
+    ball_vel_y = _mean([vel[1] for vel in ball_vel])
     ball_speeds = [hypot(vel_x, vel_y) for vel_x, vel_y in ball_vel]
-    average_ball_speed = float(np.mean(ball_speeds))
-    max_ball_speed = float(np.max(ball_speeds))
+    average_ball_speed = _mean(ball_speeds)
+    max_ball_speed = max(ball_speeds)
 
-    # Posession time
     red_possession_time = [0, 0, 0, 0]
     blue_possession_time = [0, 0, 0, 0]
     possession_owner_by_sample = []
-    for bp in ball_pos:
-        if 40 <= bp[0] < 130:
+    for ball_x, _ in ball_pos:
+        if 40 <= ball_x < 130:
             red_possession_time[0] += 1
             possession_owner_by_sample.append("red")
-        elif 180 <= bp[0] < 280:
+        elif 180 <= ball_x < 280:
             red_possession_time[1] += 1
             possession_owner_by_sample.append("red")
-        elif 330 <= bp[0] < 430:
+        elif 330 <= ball_x < 430:
             blue_possession_time[3] += 1
             possession_owner_by_sample.append("blue")
-        elif 480 <= bp[0] < 580:
+        elif 480 <= ball_x < 580:
             red_possession_time[2] += 1
             possession_owner_by_sample.append("red")
-        elif 630 <= bp[0] < 730:
+        elif 630 <= ball_x < 730:
             blue_possession_time[2] += 1
             possession_owner_by_sample.append("blue")
-        elif 780 <= bp[0] < 880:
+        elif 780 <= ball_x < 880:
             red_possession_time[3] += 1
             possession_owner_by_sample.append("red")
-        elif 930 <= bp[0] < 1030:
+        elif 930 <= ball_x < 1030:
             blue_possession_time[1] += 1
             possession_owner_by_sample.append("blue")
-        elif 1080 <= bp[0] < 1170:
+        elif 1080 <= ball_x < 1170:
             blue_possession_time[0] += 1
             possession_owner_by_sample.append("blue")
         else:
@@ -212,10 +226,10 @@ def analysis():
             blue_shots_by_rod[closest_blue_rod] += 1
             shot_cooldown = SHOT_COOLDOWN_STEPS
 
-    red_average_shot_speed = float(np.mean(red_shot_speeds)) if red_shot_speeds else 0.0
-    blue_average_shot_speed = float(np.mean(blue_shot_speeds)) if blue_shot_speeds else 0.0
-    red_fastest_shot = float(np.max(red_shot_speeds)) if red_shot_speeds else 0.0
-    blue_fastest_shot = float(np.max(blue_shot_speeds)) if blue_shot_speeds else 0.0
+    red_average_shot_speed = _mean(red_shot_speeds)
+    blue_average_shot_speed = _mean(blue_shot_speeds)
+    red_fastest_shot = max(red_shot_speeds) if red_shot_speeds else 0.0
+    blue_fastest_shot = max(blue_shot_speeds) if blue_shot_speeds else 0.0
     red_shot_conversion = 100.0 * score[0] / len(red_shot_speeds) if red_shot_speeds else 0.0
     blue_shot_conversion = 100.0 * score[1] / len(blue_shot_speeds) if blue_shot_speeds else 0.0
     red_average_time_per_goal_s = total_play_time_s / score[0] if score[0] > 0 else 0.0
@@ -242,6 +256,7 @@ def analysis():
     red_shots_by_rod_named = dict(zip(ROD_NAMES, red_shots_by_rod))
     blue_shots_by_rod_named = dict(zip(ROD_NAMES, blue_shots_by_rod))
 
+    print("Combined score", score)
     print("Total play time [s]", total_play_time_s)
     print("Ball position x", ball_pos_x)
     print("Ball velocity x", ball_vel_x)
@@ -272,9 +287,33 @@ def analysis():
     print("Blue average time per goal [s]", blue_average_time_per_goal_s)
 
 
+def main(file1: str, file2: str) -> None:
+    worker_count = _worker_count()
+    print("Worker processes", worker_count)
+
+    ctx = mp.get_context("spawn")
+    progress = ctx.Array("i", worker_count * 2)
+    progress_lock = ctx.Lock()
+    print("Progress", list(progress), flush=True)
+
+    with ctx.Pool(
+        processes=worker_count,
+        initializer=_init_worker,
+        initargs=(progress, progress_lock),
+    ) as pool:
+        worker_args = [(worker_id, file1, file2) for worker_id in range(1, worker_count + 1)]
+        results = []
+        for result in pool.starmap(_run_single_match, worker_args):
+            print(f"Simulator {result['worker_id']} score {result['score']}")
+            results.append(result)
+
+    score, ball_pos, ball_vel = _merge_results(results)
+    analysis(score, ball_pos, ball_vel)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
-        print("Usage: python compare.py <path to file1> <path to file2>")
-        exit(1)
+    if len(sys.argv) != 3:
+        print("Usage: python compare_mp.py <path to file1> <path to file2>")
+        raise SystemExit(1)
 
     main(sys.argv[1], sys.argv[2])
